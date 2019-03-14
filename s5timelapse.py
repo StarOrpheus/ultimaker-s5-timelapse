@@ -1,15 +1,47 @@
 #!/usr/local/bin/python3
-import time, json, os, sqlite3, uuid
+import time, json, os, sqlite3, uuid, json, base64
 import requests as http
 import numpy as np
 from os.path import isfile, join
 from threading import Thread
 from datetime import date, datetime
+from websocket_server import WebsocketServer
 
 FRAMERATE = 30
 TIMELAPSE_DURATION = 60
 TIMELAPSE_PATH = "timelapses"
 DATABASE_PATH = "timelapses.db"
+PORT = 8123
+IP = "127.0.0.1"
+
+def export_database():
+	db = sqlite3.connect(DATABASE_PATH)
+	db_cur = db.cursor()
+	
+	db_cur.execute("SELECT * FROM timelapses")
+	timelapses = db_cur.fetchall()
+	
+	db.commit()
+	db.close()
+
+	response = {}
+	for timelapse in timelapses:
+		if timelapse[-1] != None:
+			timelapse = timelapse[:-1] + (base64.b64encode(timelapse[-1]).decode(), )
+		response[int(timelapse[0])] = timelapse
+	
+	return json.dumps(response)
+
+def new_client(client, server):
+	server.send_message(client, export_database())
+
+def update_clients():
+	clientServer.send_message_to_all(export_database())
+
+clientServer = WebsocketServer(PORT, IP)
+clientServer.set_fn_new_client(new_client)
+clientServerThread = Thread(None, clientServer.run_forever)
+clientServerThread.start()
 
 # Checks if a print is running
 #
@@ -36,22 +68,41 @@ def is_pre_printing():
 	state = http.get("http://10.32.10.20/api/v1/print_job/state").json()
 	return state == 'pre_print'
 
-# Add a timelapse in the database
-#
-# @return int the id of the timelapse
-def register_print_start():
+def register_pre_printing():
 	db = sqlite3.connect(DATABASE_PATH)
 	db_cur = db.cursor()
 
 	title = http.get("http://10.32.10.20/api/v1/print_job/name").json()
 	duration = http.get("http://10.32.10.20/api/v1/print_job/time_total").json()
-	status = "printing"
+	status = "pre-printing"
 	
-	db_cur.execute("INSERT INTO 'timelapses' VALUES(NULL, ?, ?, ?, ?)", (title, status, duration, date.today()))
+	db_cur.execute("INSERT INTO 'timelapses' VALUES(NULL, ?, ?, ?, ?, NULL)", (title, status, duration, date.today()))
 	
 	db.commit()
 	db.close()
 	return db_cur.lastrowid
+
+# Add a timelapse in the database
+#
+# @return int the id of the timelapse
+def register_print_start(id):
+	db = sqlite3.connect(DATABASE_PATH)
+	db_cur = db.cursor()
+
+	status = "printing"
+
+	db_cur.execute("UPDATE timelapses SET status = ? WHERE id = ?", (status, id, ))
+
+def store_preview(id):
+	db = sqlite3.connect(DATABASE_PATH)
+	db_cur = db.cursor()
+
+	f = open("tmp/preview.jpg", "rb")
+	db_cur.execute("UPDATE timelapses SET preview = ? WHERE id = ?", (sqlite3.Binary(f.read()), id, ))
+	f.close()
+
+	db.commit()
+	db.close()
 
 # Updates a timelapse status
 #
@@ -79,7 +130,8 @@ def check_timelapses():
 		title TEXT,
 		status TEXT,
 		duration INTEGER,
-		date DATE)
+		date DATE,
+		preview BLOB)
 	""");
 
 	db_cur.execute("SELECT * from timelapses")
@@ -88,8 +140,13 @@ def check_timelapses():
 	# checks if timelapse files are not missing
 	for timelapse in timelapses:
 		filepath = get_filepath(timelapse[0])
-		if not os.path.isfile(filepath):
-			update_timelapse_status(timelapse[0], "missing")
+		if timelapse[2] == "pre-printing" and not is_printing():
+			update_timelapse_status(timelapse[0], "failed")
+		elif timelapse[2] == "printing" and not is_printing():
+			update_timelapse_status(timelapse[0], "failed")
+		elif timelapse[2] == "finished":
+			if not os.path.isfile(filepath):
+				update_timelapse_status(timelapse[0], "missing")
 
 	# deletes a timelapse and its file if too old
 	for timelapse in timelapses:
@@ -120,20 +177,27 @@ def get_filepath(id):
 
 	return os.path.join(TIMELAPSE_PATH, title + str(id) + ".avi")
 
-def start_timelapse_daemon():
+def start_timelapse_daemon(update_clients):
 	while True:
 		check_timelapses()
+		update_clients()
 
 		print("Waiting for print to start...")
 		while not is_printing():
 			time.sleep(5)
 
 		print("Waiting for printer calibration...")
+		current_print_id = register_pre_printing()
+		update_clients()
 		while is_pre_printing():
 			time.sleep(1)
 
+		if not is_printing():
+			continue
+
 		print("Printing...")
-		current_print_id = register_print_start()
+		register_print_start(current_print_id)
+		update_clients()
 		# removes existing tmp folder
 		if os.path.isdir("tmp"):
 			for file in os.listdir("tmp"):
@@ -153,16 +217,20 @@ def start_timelapse_daemon():
 			f = open(filepath, 'bw')
 			f.write(res.content)
 			f.close()
-
+			
 			time.sleep(duration / (FRAMERATE * TIMELAPSE_DURATION))
 		
 		update_timelapse_status(current_print_id, "finished")
+		update_clients()
 		# generates the video
 		filepath = get_filepath(current_print_id)
 		if not os.path.isdir(TIMELAPSE_PATH):
 			os.mkdir(TIMELAPSE_PATH)
-		ffmpegcmd = "ffmpeg -r 30 -i 'tmp/%d.jpg' -qscale 7 " + filepath 
-		os.system(ffmpegcmd)
+		os.system("ffmpeg -r " + str(FRAMERATE) + " -i 'tmp/%d.jpg' -qscale 7 " + filepath)
+		# extracts a preview image
+		os.system("ffmpeg -i " + filepath + " -vf \"select='eq(n," + str(5 * frame // 6) + ")'\" -vframes 1 tmp/preview.jpg")
+		store_preview(current_print_id)
+		update_clients()
 		
 		# removes the tmp folder
 		for file in os.listdir("tmp"):
@@ -172,5 +240,4 @@ def start_timelapse_daemon():
 		os.rmdir("tmp")
 		print("Print done!")
 
-timelapseDaemonThread = Thread(None, start_timelapse_daemon)
-timelapseDaemonThread.start()
+start_timelapse_daemon(update_clients)
