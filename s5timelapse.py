@@ -30,16 +30,38 @@ def export_database():
 			timelapse = timelapse[:-1] + (base64.b64encode(timelapse[-1]).decode(), )
 		response[int(timelapse[0])] = timelapse
 	
-	return json.dumps(response)
+	return response
 
 def new_client(client, server):
-	server.send_message(client, export_database())
+	server.send_message(client, json.dumps({ "type" : "spontaneous", "content" : export_database() }))
 
 def update_clients():
-	clientServer.send_message_to_all(export_database())
+	clientServer.send_message_to_all(json.dumps({ "type" : "spontaneous", "content" : export_database() }))
+
+def message_received(client, server, message):
+	message = json.loads(message)
+	response = {}
+	if message["type"] == "request":
+		if message["method"] == "get_timelapse":
+			response = { "type" : "request_response", "request_id" : message["request_id"], "method" : message["method"], "content" : {} }
+			
+			filename = os.path.join(TIMELAPSE_PATH, message["content"]["title"] + str(message["content"]["id"]) + ".mp4")
+			try:
+				f = open(filename, "rb")
+				timelapse = f.read()
+				f.close()
+
+				timelapse = base64.b64encode(timelapse).decode()
+			except Exception as e:
+				timelapse = None
+
+			response["content"]["timelapse"] = timelapse
+
+	server.send_message(client, json.dumps(response))
 
 clientServer = WebsocketServer(PORT, IP)
 clientServer.set_fn_new_client(new_client)
+clientServer.set_fn_message_received(message_received)
 clientServerThread = Thread(None, clientServer.run_forever)
 clientServerThread.start()
 
@@ -48,9 +70,9 @@ clientServerThread.start()
 # @return boolean the status of the printer
 def is_printing():
 	try:
-		status = http.get("http://10.32.10.20/api/v1/printer/status")
+		status = http.get("http://10.32.10.20/api/v1/printer/status", timeout=1)
 		if status.json() == "printing":
-			state = http.get("http://10.32.10.20/api/v1/print_job/state").json()
+			state = http.get("http://10.32.10.20/api/v1/print_job/state", timeout=1).json()
 			if state == 'none' or state == 'wait_cleanup' or state == "wait_user_action":
 				return False
 			else:
@@ -58,22 +80,21 @@ def is_printing():
 		else:
 			return False;
 	except Exception as e:
-		print(e)
 		return False
 
 # Checks if a print is starting
 #
 # @return boolean the status of the calibration
 def is_pre_printing():
-	state = http.get("http://10.32.10.20/api/v1/print_job/state").json()
+	state = http.get("http://10.32.10.20/api/v1/print_job/state", timeout=1).json()
 	return state == 'pre_print'
 
 def register_pre_printing():
 	db = sqlite3.connect(DATABASE_PATH)
 	db_cur = db.cursor()
 
-	title = http.get("http://10.32.10.20/api/v1/print_job/name").json()
-	duration = http.get("http://10.32.10.20/api/v1/print_job/time_total").json()
+	title = http.get("http://10.32.10.20/api/v1/print_job/name", timeout=1).json()
+	duration = http.get("http://10.32.10.20/api/v1/print_job/time_total", timeout=1).json()
 	status = "pre-printing"
 	
 	db_cur.execute("INSERT INTO 'timelapses' VALUES(NULL, ?, ?, ?, ?, NULL)", (title, status, duration, date.today()))
@@ -144,6 +165,9 @@ def check_timelapses():
 			update_timelapse_status(timelapse[0], "failed")
 		elif timelapse[2] == "printing" and not is_printing():
 			update_timelapse_status(timelapse[0], "failed")
+		elif timelapse[2] == "missing":
+			if os.path.isfile(filepath):
+				update_timelapse_status(timelapse[0], "finished")
 		elif timelapse[2] == "finished":
 			if not os.path.isfile(filepath):
 				update_timelapse_status(timelapse[0], "missing")
@@ -175,7 +199,7 @@ def get_filepath(id):
 	db.commit()
 	db.close()
 
-	return os.path.join(TIMELAPSE_PATH, title + str(id) + ".avi")
+	return os.path.join(TIMELAPSE_PATH, title + str(id) + ".mp4")
 
 def start_timelapse_daemon(update_clients):
 	while True:
@@ -184,6 +208,7 @@ def start_timelapse_daemon(update_clients):
 
 		print("Waiting for print to start...")
 		while not is_printing():
+			check_timelapses()
 			time.sleep(5)
 
 		print("Waiting for printer calibration...")
@@ -226,7 +251,7 @@ def start_timelapse_daemon(update_clients):
 		filepath = get_filepath(current_print_id)
 		if not os.path.isdir(TIMELAPSE_PATH):
 			os.mkdir(TIMELAPSE_PATH)
-		os.system("ffmpeg -r " + str(FRAMERATE) + " -i 'tmp/%d.jpg' -qscale 7 " + filepath)
+		os.system("ffmpeg -r " + str(FRAMERATE) + " -i 'tmp/%d.jpg' -qscale 7 -c:v libx264 " + filepath)
 		# extracts a preview image
 		os.system("ffmpeg -i " + filepath + " -vf \"select='eq(n," + str(5 * frame // 6) + ")'\" -vframes 1 tmp/preview.jpg")
 		store_preview(current_print_id)
