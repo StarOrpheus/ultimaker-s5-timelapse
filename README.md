@@ -9,6 +9,7 @@ A script to automatically recover timelapses from 3D prints and store metadata i
 ```
 python >= 2.7
 ffmpeg >= 4.1.1
+sqlite >= 3.14
 ```
 
 ## Usage
