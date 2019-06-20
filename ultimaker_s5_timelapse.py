@@ -1,9 +1,12 @@
 #!/usr/local/bin/python3
-import time, json, os, sqlite3, uuid, json, base64
+import time, json, os, sqlite3, uuid, json, base64, sys
 import requests as http
 import numpy as np
 from os.path import isfile, join
 from datetime import date, datetime
+from argparse import ArgumentParser
+
+PRINTER_IP = ""
 
 FRAMERATE = 30
 TIMELAPSE_DURATION = 60
@@ -15,9 +18,9 @@ DATABASE_PATH = "timelapses.db"
 # @return boolean the status of the printer
 def is_printing():
 	try:
-		status = http.get("http://10.32.10.20/api/v1/printer/status", timeout=1)
+		status = http.get("http://" + PRINTER_IP + "/api/v1/printer/status", timeout=1)
 		if status.json() == "printing":
-			state = http.get("http://10.32.10.20/api/v1/print_job/state", timeout=1).json()
+			state = http.get("http://" + PRINTER_IP + "/api/v1/print_job/state", timeout=1).json()
 			if state == 'none' or state == 'wait_cleanup' or state == "wait_user_action":
 				return False
 			else:
@@ -31,15 +34,18 @@ def is_printing():
 #
 # @return boolean the status of the calibration
 def is_pre_printing():
-	state = http.get("http://10.32.10.20/api/v1/print_job/state", timeout=1).json()
+	state = http.get("http://" + PRINTER_IP + "/api/v1/print_job/state", timeout=1).json()
 	return state == 'pre_print'
 
+# Adds a pre-printing print in the database
+#
+# @returns int the id of the timelapse
 def register_pre_printing():
 	db = sqlite3.connect(DATABASE_PATH)
 	db_cur = db.cursor()
 
-	title = http.get("http://10.32.10.20/api/v1/print_job/name", timeout=1).json()
-	duration = http.get("http://10.32.10.20/api/v1/print_job/time_total", timeout=1).json()
+	title = http.get("http://" + PRINTER_IP + "/api/v1/print_job/name", timeout=1).json()
+	duration = http.get("http://" + PRINTER_IP + "/api/v1/print_job/time_total", timeout=1).json()
 	status = "pre-printing"
 	
 	db_cur.execute("INSERT INTO 'timelapses' VALUES(NULL, ?, ?, ?, ?, NULL)", (title, status, duration, date.today()))
@@ -48,17 +54,7 @@ def register_pre_printing():
 	db.close()
 	return db_cur.lastrowid
 
-# Add a timelapse in the database
-#
-# @return int the id of the timelapse
-def register_print_start(id):
-	db = sqlite3.connect(DATABASE_PATH)
-	db_cur = db.cursor()
-
-	status = "printing"
-
-	db_cur.execute("UPDATE timelapses SET status = ? WHERE id = ?", (status, id, ))
-
+# Saves a preview image of the timelapse in the database
 def store_preview(id):
 	db = sqlite3.connect(DATABASE_PATH)
 	db_cur = db.cursor()
@@ -163,7 +159,7 @@ def start_timelapse_daemon():
 			continue
 
 		print("Printing...")
-		register_print_start(current_print_id)
+		update_timelapse_status(current_print_id, "printing")
 		# removes existing tmp folder
 		if os.path.isdir("tmp"):
 			for file in os.listdir("tmp"):
@@ -173,11 +169,11 @@ def start_timelapse_daemon():
 		else:
 			os.mkdir("tmp")
 
-		duration = http.get("http://10.32.10.20/api/v1/print_job/time_total").json();
+		duration = http.get("http://" + PRINTER_IP + "/api/v1/print_job/time_total").json();
 		frame = 0
 		while is_printing():
 			frame += 1
-			res = http.get("http://10.32.10.20:8080/?action=snapshot")
+			res = http.get("http://" + PRINTER_IP + ":8080/?action=snapshot")
 			
 			filepath = "tmp/" + str(frame) + ".jpg"
 			f = open(filepath, 'bw')
@@ -203,5 +199,11 @@ def start_timelapse_daemon():
 				os.remove(file_path)
 		os.rmdir("tmp")
 		print("Print done!")
+
+parser = ArgumentParser(description='Recover timelapses from the ultimaker s5 printer')
+parser.add_argument('-ip', help='specifies the ip of the printer', required=True)
+args = parser.parse_args()
+
+PRINTER_IP = args.ip
 
 start_timelapse_daemon()
