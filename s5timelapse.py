@@ -3,67 +3,12 @@ import time, json, os, sqlite3, uuid, json, base64
 import requests as http
 import numpy as np
 from os.path import isfile, join
-from threading import Thread
 from datetime import date, datetime
-from websocket_server import WebsocketServer
 
 FRAMERATE = 30
 TIMELAPSE_DURATION = 60
 TIMELAPSE_PATH = "timelapses"
 DATABASE_PATH = "timelapses.db"
-PORT = 8123
-IP = "127.0.0.1"
-
-def export_database():
-	db = sqlite3.connect(DATABASE_PATH)
-	db_cur = db.cursor()
-	
-	db_cur.execute("SELECT * FROM timelapses")
-	timelapses = db_cur.fetchall()
-	
-	db.commit()
-	db.close()
-
-	response = {}
-	for timelapse in timelapses:
-		if timelapse[-1] != None:
-			timelapse = timelapse[:-1] + (base64.b64encode(timelapse[-1]).decode(), )
-		response[int(timelapse[0])] = timelapse
-	
-	return response
-
-def new_client(client, server):
-	server.send_message(client, json.dumps({ "type" : "spontaneous", "content" : export_database() }))
-
-def update_clients():
-	clientServer.send_message_to_all(json.dumps({ "type" : "spontaneous", "content" : export_database() }))
-
-def message_received(client, server, message):
-	message = json.loads(message)
-	response = {}
-	if message["type"] == "request":
-		if message["method"] == "get_timelapse":
-			response = { "type" : "request_response", "request_id" : message["request_id"], "method" : message["method"], "content" : {} }
-			
-			filename = os.path.join(TIMELAPSE_PATH, message["content"]["title"] + str(message["content"]["id"]) + ".mp4")
-			try:
-				f = open(filename, "rb")
-				timelapse = f.read()
-				f.close()
-
-				timelapse = base64.b64encode(timelapse).decode()
-			except Exception as e:
-				timelapse = None
-
-			response["content"]["timelapse"] = timelapse
-
-	server.send_message(client, json.dumps(response))
-
-clientServer = WebsocketServer(PORT, IP)
-clientServer.set_fn_new_client(new_client)
-clientServer.set_fn_message_received(message_received)
-clientServerThread = Thread(None, clientServer.run_forever)
-clientServerThread.start()
 
 # Checks if a print is running
 #
@@ -201,19 +146,16 @@ def get_filepath(id):
 
 	return os.path.join(TIMELAPSE_PATH, title + str(id) + ".mp4")
 
-def start_timelapse_daemon(update_clients):
+def start_timelapse_daemon():
 	while True:
 		check_timelapses()
-		update_clients()
 
 		print("Waiting for print to start...")
 		while not is_printing():
-			check_timelapses()
 			time.sleep(5)
 
 		print("Waiting for printer calibration...")
 		current_print_id = register_pre_printing()
-		update_clients()
 		while is_pre_printing():
 			time.sleep(1)
 
@@ -222,7 +164,6 @@ def start_timelapse_daemon(update_clients):
 
 		print("Printing...")
 		register_print_start(current_print_id)
-		update_clients()
 		# removes existing tmp folder
 		if os.path.isdir("tmp"):
 			for file in os.listdir("tmp"):
@@ -246,7 +187,6 @@ def start_timelapse_daemon(update_clients):
 			time.sleep(duration / (FRAMERATE * TIMELAPSE_DURATION))
 		
 		update_timelapse_status(current_print_id, "finished")
-		update_clients()
 		# generates the video
 		filepath = get_filepath(current_print_id)
 		if not os.path.isdir(TIMELAPSE_PATH):
@@ -255,7 +195,6 @@ def start_timelapse_daemon(update_clients):
 		# extracts a preview image
 		os.system("ffmpeg -i " + filepath + " -vf \"select='eq(n," + str(5 * frame // 6) + ")'\" -vframes 1 tmp/preview.jpg")
 		store_preview(current_print_id)
-		update_clients()
 		
 		# removes the tmp folder
 		for file in os.listdir("tmp"):
@@ -265,4 +204,4 @@ def start_timelapse_daemon(update_clients):
 		os.rmdir("tmp")
 		print("Print done!")
 
-start_timelapse_daemon(update_clients)
+start_timelapse_daemon()
