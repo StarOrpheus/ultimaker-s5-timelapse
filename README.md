@@ -1,7 +1,6 @@
 # ultimaker-s5-timelapse
-A script to automatically recover timelapses from 3D.
 
-Each timelapse metadata is stored in a local SQLite database.
+A script to automatically recover timelapses from 3D prints and store metadata in a local SQLite database.
 
 `ultimaker-s5-timelapse` was created by [Clément Chaine](https://github.com/cchaine)
 
