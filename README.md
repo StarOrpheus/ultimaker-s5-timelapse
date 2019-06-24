@@ -16,7 +16,7 @@ sqlite >= 3.14
 
 Both the Ultimaker S5 printer and the computer need to be connected to the same network.
 ```
-usage: python ultimaker_s5_timelapse [-h] -ip IP
+usage: python ultimaker_s5_timelapse.py [-h] -ip IP
 
     IP is the local ip address of your printer
 ```
