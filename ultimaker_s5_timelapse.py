@@ -1,7 +1,6 @@
 #!/usr/local/bin/python3
 import time, json, os, sqlite3, uuid, json, base64, sys
 import requests as http
-import numpy as np
 from os.path import isfile, join
 from datetime import date, datetime
 from argparse import ArgumentParser
